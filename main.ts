@@ -1,110 +1,87 @@
-import mysql from 'mysql';
 import express from 'express';
-import { dbConfig } from './dbConfig.ts';
+import mysql from 'mysql';
+import { promisify } from 'util';
 
 const connection = mysql.createConnection({
-  host: dbConfig.HOST,
-  user: dbConfig.USER,
-  password: dbConfig.PASSWORD,
-  database: dbConfig.DB,
+  host: 'localhost',
+  user: 'root',
+  password: 'password',
+  database: 'test'
 });
+
+connection.connect(err => { if (err) throw err; });
+const query = promisify(connection.query).bind(connection) as (sql: string, values?: any[]) => Promise<any>;   // promisified
+
+type ChatMember = { chatId: number; userId: number };
+
+async function getOrCreateChat(userAId: number, userBId: number): Promise<number> {
+  const [a, b] = [userAId, userBId].sort((x, y) => x - y);
+
+  const rows = await query('SELECT ChatID FROM customers WHERE UserID = ? LIMIT 1', [a]) as any[];
+  if (rows.length) return rows[0].ChatID;
+
+  const chatId = a;
+  await query('INSERT INTO customers (UserID, ChatID) VALUES (?, ?)', [a, chatId]);
+  await query('INSERT INTO customers (UserID, ChatID) VALUES (?, ?)', [b, chatId]);
+  return chatId;
+}
 
 const app = express();
-const port = 3000;
 app.use(express.json());
+const PORT = 3000;
 
+// 1. Create or Get Chat
 app.post('/chat/create', async (req, res) => {
-  const body = req.body;
   try {
-    // store this response in sql
-    connection.connect((err) => {
-      if (err) throw err;
-      console.log("Connected to the database!");
-
-      const sql = "INSERT INTO customers (UserID, ChatID) VALUES (?, ?)";
-      //same chat id for user and chat id
-      for (let key in body) {
-        connection.query(sql, [body[key], body[key]], (err, result) => {
-          if (err) throw err;
-          console.log("Record inserted:", result.insertId);
-        });
-      }
-    });
-    console.log('query executed', body.userAId, body.userBId);
-    res.status(201).json({ message: `Chat '${body.userAId}' ${body.userBId} and created successfully!` });
-  } catch (err) {
-    console.error('Error executing query', err);
-  }
-
+    const chatId = await getOrCreateChat(req.body.userAId, req.body.userBId);
+    res.status(201).json({ chatId });
+  } catch (e) { console.error(e); res.sendStatus(500); }
 });
 
-//POST /chat/:chatId/message/send
+// 2. Send Message
 app.post('/chat/:chatId/message/send', async (req, res) => {
   const { chatId } = req.params;
-  const { senderId, message } = req.body;
+  const { senderId, text } = req.body;
   try {
-    // store this response in sql
-    console.log('query executed', chatId, senderId, message);
-    const sql = "INSERT INTO customers (UserId, ChatID, SenderID, Messages) VALUES (?, ?, ?)";
-    connection.query(sql, [chatId, chatId, senderId, message], (err, result) => {
-      if (err) throw err;
-      console.log("Message inserted:", result.insertId);
-    });
-    res.status(201).json({ message: `Message sent successfully in chat '${chatId}'!` });
-  } catch (err) {
-    console.error('Error executing query', err);
-  }
+    const result = await query(
+      `INSERT INTO customers (ChatID, SenderId, Text, Messages, sentAt)
+       VALUES (?, ?, ?, ?, NOW())`,
+      [chatId, senderId, text, text]
+    ) as any;
+    res.status(201).json({ messageId: result.insertId });
+  } catch (e) { console.error(e); res.sendStatus(500); }
 });
 
-//GET /chat/:chatId/messages?limit=50
+// 3. Get Messages
 app.get('/chat/:chatId/messages', async (req, res) => {
-  const { chatId } = req.params;
-  const limit = req.query.limit || 50;
+  const chatId = Number(req.params.chatId);
+  const limit = Number(req.query.limit) || 50;
   try {
-    // fetch messages from sql
-    console.log('query executed', chatId, limit);
-    res.status(200).json({ messages: [] });
-  } catch (err) {
-    console.error('Error executing query', err);
-  }
+    const messages = await query(
+      `SELECT UserID as id, ChatID as chatId, SenderId, Text as text, sentAt
+       FROM customers
+       WHERE ChatID = ? AND Text IS NOT NULL
+       ORDER BY sentAt DESC
+       LIMIT ?`,
+      [chatId, limit]
+    );
+    res.json({ messages });
+  } catch (e) { console.error(e); res.sendStatus(500); }
 });
 
-// POST /chat/:chatId/message/:messageId/read
-app.post('/chat/:chatId/message/:messageId/read', async (req, res) => {
-  const { chatId, messageId } = req.params;
-  try {
-    // update message status in sql
-    console.log('query executed', chatId, messageId);
-    res.status(200).json({ message: `Message '${messageId}' in chat '${chatId}' marked as read!` });
-  } catch (err) {
-    console.error('Error executing query', err);
-  }
-});
+// 4. Mark Read  (stub)
+app.post('/chat/:chatId/message/:messageId/read', (req, res) => res.json({ ok: true }));
 
-// POST /chat/:chatId/lastseen
-app.post('/chat/:chatId/lastseen', async (req, res) => {
-  const { chatId } = req.params;
-  const { userId, timestamp } = req.body;
-  try {
-    // update last seen in sql
-    console.log('query executed', chatId, userId, timestamp);
-    res.status(200).json({ message: `Last seen for user '${userId}' in chat '${chatId}' updated!` });
-  } catch (err) {
-    console.error('Error executing query', err);
-  }
-});
+// 5. Update Last Seen  (stub)
+app.post('/chat/:chatId/lastseen', (req, res) => res.json({ ok: true }));
 
-// GET /user/:userId/chats
+// 6. List User Chats
 app.get('/user/:userId/chats', async (req, res) => {
-  const { userId } = req.params;
+  const userId = Number(req.params.userId);
   try {
-    // fetch chats from sql
-    console.log('query executed', userId);
-    res.status(200).json({ chats: [] });
-  } catch (err) {
-    console.error('Error executing query', err);
-  }
+    const rows = await query('SELECT DISTINCT ChatID FROM customers WHERE UserID = ?', [userId]) as any[];
+    res.json({ chats: rows.map(r => ({ chatId: r.ChatID, members: [] })) });
+  } catch (e) { console.error(e); res.sendStatus(500); }
 });
-app.listen(port, () => {
-  console.log(`Server is running at http://localhost:${port}`);
-});
+
+app.listen(PORT, () => console.log(`Chat API on http://localhost:${PORT}`));
